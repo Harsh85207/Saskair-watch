@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SaskAir Watch - Sprint 1 (hourly weather and air quality ingestion to S3)
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: saskair-watch
+  City:
+    Type: String
+    Default: Saskatoon
+  Latitude:
+    Type: String
+    Default: "52.13"
+  Longitude:
+    Type: String
+    Default: "-106.67"
+  CodeBucket:
+    Type: String
+    Description: S3 bucket that holds the zipped Lambda code (uploaded by the pipeline)
+  CodeKey:
+    Type: String
+    Description: S3 key of the zipped Lambda code, e.g. ingest-<commit>.zip
+  ExistingRoleArn:
+    Type: String
+    Default: ""
+    Description: >-
+      Leave empty to create a new IAM role. If your AWS account cannot create
+      IAM roles (for example AWS Academy Learner Lab), paste the LabRole ARN here.
+
+Conditions:
+  CreateRole: !Equals [!Ref ExistingRoleArn, ""]
+
+Resources:
+  RawDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-raw-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  IngestFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateRole
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WriteRawData
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub "${RawDataBucket.Arn}/raw/*"
+
+  IngestLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-ingest"
+      RetentionInDays: 14
+
+  IngestFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: IngestLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-ingest"
+      Description: Fetches weather and AQI from Open-Meteo every hour and saves raw JSON to S3
+      Runtime: python3.12
+      Handler: app.lambda_handler
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref CodeKey
+      Timeout: 60
+      MemorySize: 128
+      Role: !If [CreateRole, !GetAtt IngestFunctionRole.Arn, !Ref ExistingRoleArn]
+      Environment:
+        Variables:
+          RAW_BUCKET: !Ref RawDataBucket
+          CITY: !Ref City
+          LATITUDE: !Ref Latitude
+          LONGITUDE: !Ref Longitude
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  HourlySchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${ProjectName}-hourly"
+      Description: Runs the Ingest Lambda every hour
+      ScheduleExpression: rate(1 hour)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestFunction.Arn
+          Id: IngestFunctionTarget
+
+  AllowEventBridgeToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HourlySchedule.Arn
+
+  IngestErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-ingest-errors"
+      AlarmDescription: The Ingest Lambda failed at least once in the last hour
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  RawDataBucketName:
+    Value: !Ref RawDataBucket
+  IngestFunctionName:
+    Value: !Ref IngestFunction
+  ScheduleRule:
+    Value: !Ref HourlySchedule
