@@ -62,3 +62,8 @@ Tag the release when Sprint 1 is done: `git tag v1.0 && git push origin v1.0`.
 
 Delete the `saskair-watch` stack in CloudFormation. Empty the raw data bucket first, because
 CloudFormation can't delete a bucket that still has files in it.
+
+## Sprint 1 status
+- Sprint 1 completed on Nov 4, 2026 (release v1.0)
+- Data is collected every hour and saved in S3
+- Pipeline runs tests on every pull request and deploys on merge to main
