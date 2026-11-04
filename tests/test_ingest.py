@@ -69,3 +69,10 @@ def test_handler_saves_raw_json_to_s3(monkeypatch):
     assert body["weather"]["current"]["temperature_2m"] == -12.4
     assert result["statusCode"] == 200
     assert result["us_aqi"] == 42
+
+def test_build_record_keeps_both_responses():
+    rec = app.build_record("Saskatoon", 52.13, -106.67, WEATHER, AIR, NOW)
+    assert rec["city"] == "Saskatoon"
+    assert rec["weather"] == WEATHER
+    assert rec["air_quality"] == AIR
+    assert rec["collected_at_utc"].startswith("2026-11-03T14")
