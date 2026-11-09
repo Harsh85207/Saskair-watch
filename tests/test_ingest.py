@@ -70,9 +70,66 @@ def test_handler_saves_raw_json_to_s3(monkeypatch):
     assert result["statusCode"] == 200
     assert result["us_aqi"] == 42
 
+
 def test_build_record_keeps_both_responses():
     rec = app.build_record("Saskatoon", 52.13, -106.67, WEATHER, AIR, NOW)
     assert rec["city"] == "Saskatoon"
     assert rec["weather"] == WEATHER
     assert rec["air_quality"] == AIR
     assert rec["collected_at_utc"].startswith("2026-11-03T14")
+
+
+# ---------- Sprint 2: cleaning (SA-7) and DynamoDB (SA-8) ----------
+
+def test_clean_record_rounds_and_converts_units():
+    clean = app.clean_record("Saskatoon", WEATHER, AIR, NOW)
+    assert clean["city"] == "saskatoon"
+    assert clean["timestamp"] == "2026-11-03T14:00:00Z"
+    assert clean["temperature_c"] == -12.4
+    assert clean["wind_kmh"] == 22.1
+    assert clean["wind_ms"] == 6.1          # 22.1 km/h / 3.6
+    assert clean["us_aqi"] == 42 and isinstance(clean["us_aqi"], int)
+    assert clean["aqi_category"] == "Good"
+
+
+def test_clean_record_handles_missing_and_bad_values():
+    weather = {"current": {"temperature_2m": None, "wind_speed_10m": "n/a"}}
+    clean = app.clean_record("Saskatoon", weather, {}, NOW)
+    assert clean["temperature_c"] is None
+    assert clean["wind_kmh"] is None and clean["wind_ms"] is None
+    assert clean["us_aqi"] is None
+    assert clean["aqi_category"] == "Unknown"
+
+
+def test_negative_zero_becomes_zero():
+    assert str(app.to_number(-0.0)) == "0.0"
+
+
+@pytest.mark.parametrize("aqi,expected", [
+    (0, "Good"), (50, "Good"), (51, "Moderate"), (120, "Unhealthy for Sensitive Groups"),
+    (180, "Unhealthy"), (250, "Very Unhealthy"), (400, "Hazardous"),
+])
+def test_aqi_category(aqi, expected):
+    assert app.aqi_category(aqi) == expected
+
+
+def test_dynamo_item_uses_decimals_and_drops_empty_values():
+    from decimal import Decimal
+    item = app.to_dynamo_item({"temperature_c": -12.4, "us_aqi": 42, "pm10": None, "city": "saskatoon"})
+    assert item["temperature_c"] == Decimal("-12.4")
+    assert item["us_aqi"] == 42
+    assert "pm10" not in item
+
+
+def test_handler_saves_clean_record_to_dynamodb(monkeypatch):
+    monkeypatch.setenv("RAW_BUCKET", "test-bucket")
+    s3, table = MagicMock(), MagicMock()
+    fake_fetch = lambda url: AIR if "air-quality" in url else WEATHER
+
+    result = app.lambda_handler({}, None, s3_client=s3, fetch=fake_fetch, now=NOW, table=table)
+
+    table.put_item.assert_called_once()
+    item = table.put_item.call_args.kwargs["Item"]
+    assert item["city"] == "saskatoon"
+    assert item["timestamp"] == "2026-11-03T14:00:00Z"
+    assert result["aqi_category"] == "Good"

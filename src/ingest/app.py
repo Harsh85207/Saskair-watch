@@ -1,7 +1,8 @@
-"""SaskAir Watch - Ingest Lambda (Sprint 1).
+"""SaskAir Watch - Ingest Lambda.
 
 Runs every hour (EventBridge). Calls the free Open-Meteo weather and
-air quality REST APIs for one city and saves the raw JSON to S3.
+air quality REST APIs for one city, saves the raw JSON to S3 (Sprint 1),
+then cleans the data and saves one record per hour in DynamoDB (Sprint 2).
 """
 import json
 import os
@@ -63,7 +64,71 @@ def build_record(city, lat, lon, weather, air, now):
     }
 
 
-def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None):
+# ---------- Sprint 2: cleaning and transformation (SA-7) ----------
+AQI_LEVELS = [
+    (50, "Good"),
+    (100, "Moderate"),
+    (150, "Unhealthy for Sensitive Groups"),
+    (200, "Unhealthy"),
+    (300, "Very Unhealthy"),
+]
+
+
+def aqi_category(aqi):
+    """US AQI number -> category name used by the dashboard colours."""
+    if aqi is None:
+        return "Unknown"
+    for limit, name in AQI_LEVELS:
+        if aqi <= limit:
+            return name
+    return "Hazardous"
+
+
+def to_number(value, digits=1):
+    """Round a value, or return None if it is missing or not a number."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return round(float(value), digits) + 0.0  # + 0.0 turns -0.0 into 0.0
+    except (TypeError, ValueError):
+        return None
+
+
+def clean_record(city, weather, air, now):
+    """Turn the two raw API responses into one flat, clean hourly record."""
+    w = (weather or {}).get("current") or {}
+    a = (air or {}).get("current") or {}
+    aqi = to_number(a.get("us_aqi"), 0)
+    aqi = int(aqi) if aqi is not None else None
+    wind_kmh = to_number(w.get("wind_speed_10m"))
+    return {
+        "city": city.lower(),
+        "timestamp": now.strftime("%Y-%m-%dT%H:00:00Z"),
+        "local_time": w.get("time") or a.get("time"),
+        "temperature_c": to_number(w.get("temperature_2m")),
+        "feels_like_c": to_number(w.get("apparent_temperature")),
+        "humidity_pct": to_number(w.get("relative_humidity_2m"), 0),
+        "wind_kmh": wind_kmh,
+        "wind_ms": round(wind_kmh / 3.6, 1) if wind_kmh is not None else None,
+        "us_aqi": aqi,
+        "pm2_5": to_number(a.get("pm2_5")),
+        "pm10": to_number(a.get("pm10")),
+        "aqi_category": aqi_category(aqi),
+    }
+
+
+def to_dynamo_item(record):
+    """DynamoDB needs Decimal instead of float, and no empty (None) values."""
+    from decimal import Decimal
+    item = {}
+    for key, value in record.items():
+        if value is None:
+            continue
+        item[key] = Decimal(str(value)) if isinstance(value, float) else value
+    return item
+
+
+def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None, table=None):
     city = os.environ.get("CITY", "Saskatoon")
     lat = float(os.environ.get("LATITUDE", "52.13"))
     lon = float(os.environ.get("LONGITUDE", "-106.67"))
@@ -87,7 +152,17 @@ def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None):
         ContentType="application/json",
     )
 
-    aqi = air.get("current", {}).get("us_aqi")
-    temp = weather.get("current", {}).get("temperature_2m")
-    print(json.dumps({"saved": f"s3://{bucket}/{key}", "us_aqi": aqi, "temperature_2m": temp}))
-    return {"statusCode": 200, "bucket": bucket, "key": key, "us_aqi": aqi, "temperature_2m": temp}
+    # Sprint 2: clean the data and save it in DynamoDB (skipped if no table is set up yet)
+    clean = clean_record(city, weather, air, now)
+    table_name = os.environ.get("TABLE_NAME")
+    if table is None and table_name:
+        import boto3
+        table = boto3.resource("dynamodb").Table(table_name)
+    if table is not None:
+        table.put_item(Item=to_dynamo_item(clean))
+
+    aqi = clean["us_aqi"]
+    temp = clean["temperature_c"]
+    print(json.dumps({"saved": f"s3://{bucket}/{key}", "stored_in_dynamodb": table is not None, "clean": clean}))
+    return {"statusCode": 200, "bucket": bucket, "key": key, "us_aqi": aqi,
+            "temperature_2m": temp, "aqi_category": clean["aqi_category"]}

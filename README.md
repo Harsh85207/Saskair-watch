@@ -3,6 +3,21 @@
 Hourly weather and air quality for Saskatoon, built on AWS with a full DevOps workflow.
 DEVP-600 final project by Harsh Thaker and Saket Shah, Saskatchewan Polytechnic.
 
+## Sprint 2 increment (v2.0)
+
+The Ingest Lambda now also **cleans** each hourly reading (rounds numbers, handles missing values,
+converts wind to m/s, adds an AQI category) and saves it in **DynamoDB** (`saskair-watch-readings`,
+key = city + timestamp). A new **Query Lambda** sits behind an **API Gateway REST API**:
+
+| Endpoint | What it returns |
+| --- | --- |
+| `GET /latest?city=saskatoon` | The most recent clean reading |
+| `GET /history?city=saskatoon&hours=24` | Hourly readings for the last 1–168 hours + daily averages (avg/min/max temperature, avg/max AQI, avg PM2.5) |
+
+The API URL is in the CloudFormation stack **Outputs** (`ApiUrl`). After every deploy the pipeline
+runs `scripts/check_api.py`, which calls the live API and checks 6 things (status codes, fields, CORS,
+bad input returns 400).
+
 ## Sprint 1 increment (v1.0)
 
 Every hour, EventBridge runs the **Ingest Lambda**. It calls the free Open-Meteo weather and
@@ -16,9 +31,12 @@ Everything is created by `template.yaml` (CloudFormation) and deployed by GitHub
 
 ```
 .github/workflows/pipeline.yml   CI/CD: test + lint on PRs, deploy + smoke test on main
-template.yaml                    S3 bucket, Lambda, IAM role, EventBridge rule, log group, error alarm
-src/ingest/app.py                Ingest Lambda (Python 3.12, no extra libraries)
-tests/test_ingest.py             Unit tests (URLs, S3 key, retries, handler)
+template.yaml                    S3, DynamoDB, 2 Lambdas, API Gateway, EventBridge, IAM, logs, alarms
+src/ingest/app.py                Ingest Lambda: fetch, save raw to S3, clean, save to DynamoDB
+src/query/query_app.py           Query Lambda behind API Gateway (/latest, /history)
+tests/test_ingest.py             Unit tests for fetching, cleaning and saving
+tests/test_query.py              Unit tests for the API logic and daily averages
+scripts/check_api.py             Live API tests run by the pipeline after each deploy
 scripts/create_backlog.sh        Creates the product backlog as GitHub issues
 ```
 
