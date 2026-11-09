@@ -55,8 +55,10 @@ jobs:
 
       - name: Package Lambda code
         run: |
-          cd src/ingest && zip -r ../../ingest.zip . -x "__pycache__/*" && cd ../..
+          (cd src/ingest && zip -r ../../ingest.zip . -x "__pycache__/*")
+          (cd src/query && zip -r ../../query.zip . -x "__pycache__/*")
           aws s3 cp ingest.zip "s3://$ARTIFACT_BUCKET/ingest-${{ github.sha }}.zip"
+          aws s3 cp query.zip "s3://$ARTIFACT_BUCKET/query-${{ github.sha }}.zip"
 
       - name: Deploy CloudFormation stack
         run: |
@@ -68,10 +70,18 @@ jobs:
             --parameter-overrides \
               CodeBucket="$ARTIFACT_BUCKET" \
               CodeKey="ingest-${{ github.sha }}.zip" \
+              QueryCodeKey="query-${{ github.sha }}.zip" \
               ExistingRoleArn="${{ vars.EXISTING_ROLE_ARN }}"
 
-      - name: Smoke test - run the Lambda once
+      - name: Smoke test - run the Ingest Lambda once
         run: |
           aws lambda invoke --function-name saskair-watch-ingest out.json
           cat out.json
           grep -q '"statusCode": 200' out.json
+
+      - name: API tests - call the live REST API
+        run: |
+          API_URL=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
+          echo "API URL: $API_URL"
+          python3 scripts/check_api.py "$API_URL"

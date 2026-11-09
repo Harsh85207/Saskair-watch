@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: SaskAir Watch - Sprint 1 (hourly weather and air quality ingestion to S3)
+Description: SaskAir Watch - Sprint 2 (hourly ingestion to S3 + DynamoDB, Query Lambda, REST API)
 
 Parameters:
   ProjectName:
@@ -19,7 +19,10 @@ Parameters:
     Description: S3 bucket that holds the zipped Lambda code (uploaded by the pipeline)
   CodeKey:
     Type: String
-    Description: S3 key of the zipped Lambda code, e.g. ingest-<commit>.zip
+    Description: S3 key of the zipped Ingest Lambda code, e.g. ingest-<commit>.zip
+  QueryCodeKey:
+    Type: String
+    Description: S3 key of the zipped Query Lambda code, e.g. query-<commit>.zip
   ExistingRoleArn:
     Type: String
     Default: ""
@@ -48,6 +51,25 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+  ReadingsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${ProjectName}-readings"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: city
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: city
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
   IngestFunctionRole:
     Type: AWS::IAM::Role
     Condition: CreateRole
@@ -69,6 +91,15 @@ Resources:
               - Effect: Allow
                 Action: s3:PutObject
                 Resource: !Sub "${RawDataBucket.Arn}/raw/*"
+        - PolicyName: ReadWriteReadings
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Query
+                Resource: !GetAtt ReadingsTable.Arn
 
   IngestLogGroup:
     Type: AWS::Logs::LogGroup
@@ -93,6 +124,7 @@ Resources:
       Environment:
         Variables:
           RAW_BUCKET: !Ref RawDataBucket
+          TABLE_NAME: !Ref ReadingsTable
           CITY: !Ref City
           LATITUDE: !Ref Latitude
           LONGITUDE: !Ref Longitude
@@ -136,6 +168,121 @@ Resources:
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
 
+  QueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${ProjectName}-query"
+      RetentionInDays: 14
+
+  QueryFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: QueryLogGroup
+    Properties:
+      FunctionName: !Sub "${ProjectName}-query"
+      Description: Returns the latest reading, hourly history and daily averages from DynamoDB
+      Runtime: python3.12
+      Handler: query_app.lambda_handler
+      Code:
+        S3Bucket: !Ref CodeBucket
+        S3Key: !Ref QueryCodeKey
+      Timeout: 15
+      MemorySize: 128
+      Role: !If [CreateRole, !GetAtt IngestFunctionRole.Arn, !Ref ExistingRoleArn]
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref ReadingsTable
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  RestApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub "${ProjectName}-api"
+      Description: SaskAir Watch REST API (/latest and /history)
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  LatestResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: latest
+
+  HistoryResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: history
+
+  LatestMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref LatestResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryFunction.Arn}/invocations"
+
+  HistoryMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref HistoryResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryFunction.Arn}/invocations"
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - LatestMethod
+      - HistoryMethod
+    Properties:
+      RestApiId: !Ref RestApi
+      Description: Sprint 2 API deployment
+
+  ApiStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref RestApi
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+
+  AllowApiGatewayToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref QueryFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/GET/*"
+
+  QueryErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-query-errors"
+      AlarmDescription: The Query Lambda failed at least once in the last hour
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref QueryFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
 Outputs:
   RawDataBucketName:
     Value: !Ref RawDataBucket
@@ -143,3 +290,10 @@ Outputs:
     Value: !Ref IngestFunction
   ScheduleRule:
     Value: !Ref HourlySchedule
+  ReadingsTableName:
+    Value: !Ref ReadingsTable
+  QueryFunctionName:
+    Value: !Ref QueryFunction
+  ApiUrl:
+    Description: Base URL of the REST API
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
