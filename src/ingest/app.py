@@ -2,7 +2,8 @@
 
 Runs every hour (EventBridge). Calls the free Open-Meteo weather and
 air quality REST APIs for one city, saves the raw JSON to S3 (Sprint 1),
-then cleans the data and saves one record per hour in DynamoDB (Sprint 2).
+then cleans the data and saves one record per hour in DynamoDB (Sprint 2),
+and sends an SNS email alert when conditions become unsafe (Sprint 3).
 """
 import json
 import os
@@ -128,7 +129,68 @@ def to_dynamo_item(record):
     return item
 
 
-def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None, table=None):
+# ---------- Sprint 3: email alerts (SA-14) ----------
+def alert_limits():
+    return {
+        "aqi": float(os.environ.get("AQI_LIMIT", "100")),
+        "cold": float(os.environ.get("COLD_LIMIT", "-30")),
+        "hot": float(os.environ.get("HOT_LIMIT", "32")),
+    }
+
+
+def check_alerts(reading, limits):
+    """Return which limits this reading breaks: 'aqi', 'cold' and/or 'hot'."""
+    if not reading:
+        return []
+    reasons = []
+    aqi = reading.get("us_aqi")
+    feels = reading.get("feels_like_c")
+    if feels is None:
+        feels = reading.get("temperature_c")
+    temp = reading.get("temperature_c")
+    if aqi is not None and aqi > limits["aqi"]:
+        reasons.append("aqi")
+    if feels is not None and feels < limits["cold"]:
+        reasons.append("cold")
+    if temp is not None and temp > limits["hot"]:
+        reasons.append("hot")
+    return reasons
+
+
+def new_alerts(current, previous):
+    """Only alert when a problem STARTS, so people don't get an email every hour."""
+    return [r for r in current if r not in previous]
+
+
+def previous_reading(table, city, timestamp):
+    res = table.query(
+        KeyConditionExpression="city = :c AND #ts < :t",
+        ExpressionAttributeNames={"#ts": "timestamp"},
+        ExpressionAttributeValues={":c": city, ":t": timestamp},
+        ScanIndexForward=False,
+        Limit=1,
+    )
+    items = res.get("Items", [])
+    return items[0] if items else None
+
+
+def alert_message(city, reading, reasons, limits):
+    lines = [f"SaskAir Watch alert for {city.title()} ({reading.get('local_time') or reading['timestamp']})", ""]
+    if "aqi" in reasons:
+        lines.append(f"- Air quality is {reading.get('aqi_category')} (US AQI {reading.get('us_aqi')}, limit {limits['aqi']:g}). "
+                     "Limit time outside, especially if you have asthma or breathing problems.")
+    if "cold" in reasons:
+        lines.append(f"- Extreme cold: feels like {reading.get('feels_like_c')} C (limit {limits['cold']:g} C). "
+                     "Cover exposed skin and limit time outside.")
+    if "hot" in reasons:
+        lines.append(f"- Extreme heat: {reading.get('temperature_c')} C (limit {limits['hot']:g} C). Stay hydrated and find shade.")
+    lines += ["", f"Temperature: {reading.get('temperature_c')} C, PM2.5: {reading.get('pm2_5')} ug/m3",
+              "You are getting this because you subscribed to SaskAir Watch alerts."]
+    subject = f"SaskAir Watch: {', '.join(r.upper() if r == 'aqi' else r for r in reasons)} alert for {city.title()}"
+    return subject[:100], "\n".join(lines)
+
+
+def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None, table=None, sns_client=None):
     city = os.environ.get("CITY", "Saskatoon")
     lat = float(os.environ.get("LATITUDE", "52.13"))
     lon = float(os.environ.get("LONGITUDE", "-106.67"))
@@ -158,11 +220,31 @@ def lambda_handler(event, context, s3_client=None, fetch=fetch_json, now=None, t
     if table is None and table_name:
         import boto3
         table = boto3.resource("dynamodb").Table(table_name)
+    previous = None
     if table is not None:
+        previous = previous_reading(table, clean["city"], clean["timestamp"])
         table.put_item(Item=to_dynamo_item(clean))
+
+    # Sprint 3: send an email alert when a limit is newly crossed (or on demand for a demo)
+    limits = alert_limits()
+    reasons = new_alerts(check_alerts(clean, limits), check_alerts(previous, limits))
+    if (event or {}).get("test_alert"):
+        reasons = reasons or ["aqi"]
+    topic_arn = os.environ.get("ALERT_TOPIC_ARN")
+    alerts_sent = []
+    if reasons and topic_arn:
+        if sns_client is None:
+            import boto3
+            sns_client = boto3.client("sns")
+        subject, message = alert_message(city, clean, reasons, limits)
+        if (event or {}).get("test_alert"):
+            subject = "[TEST] " + subject
+        sns_client.publish(TopicArn=topic_arn, Subject=subject[:100], Message=message)
+        alerts_sent = reasons
 
     aqi = clean["us_aqi"]
     temp = clean["temperature_c"]
-    print(json.dumps({"saved": f"s3://{bucket}/{key}", "stored_in_dynamodb": table is not None, "clean": clean}))
+    print(json.dumps({"saved": f"s3://{bucket}/{key}", "stored_in_dynamodb": table is not None,
+                      "alerts_sent": alerts_sent, "clean": clean}))
     return {"statusCode": 200, "bucket": bucket, "key": key, "us_aqi": aqi,
-            "temperature_2m": temp, "aqi_category": clean["aqi_category"]}
+            "temperature_2m": temp, "aqi_category": clean["aqi_category"], "alerts_sent": alerts_sent}

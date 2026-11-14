@@ -1,0 +1,60 @@
+:root {
+  --bg: #F4F6F8; --card: #FFFFFF; --ink: #1F2A33; --quiet: #5B6670; --line: #E1E6EA;
+  --brand: #1F3A4D; --accent: #E07A1F;
+  --good: #2E8B57; --moderate: #C99A06; --usg: #E07A1F; --unhealthy: #C0392B; --very: #7B2D8E; --hazard: #6E1423;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+.top { background: var(--brand); color: #fff; padding: 20px 0; }
+.top-inner { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+h1 { margin: 0; font-size: 28px; letter-spacing: -0.01em; }
+.sub { margin: 2px 0 0; color: #C9D6E0; }
+.updated { margin: 0; color: #C9D6E0; font-size: 14px; }
+main { padding-top: 20px; }
+.card { background: var(--card); border-radius: 14px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+h2 { margin: 0 0 12px; font-size: 18px; }
+h3 { margin: 18px 0 6px; font-size: 14px; color: var(--quiet); font-weight: 600; }
+.now { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.now .card { margin-bottom: 0; }
+.now { margin-bottom: 16px; }
+.aqi-card { border-top: 6px solid var(--line); }
+.aqi-row { display: flex; align-items: center; gap: 16px; }
+.aqi-number { font-size: 72px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.aqi-cat { margin: 0; font-size: 22px; font-weight: 700; }
+.aqi-scale { margin: 0; color: var(--quiet); font-size: 14px; }
+.advice { margin: 14px 0 0; color: var(--quiet); }
+.temp { margin: 0; font-size: 56px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.unit { font-size: 24px; color: var(--quiet); margin-left: 4px; }
+.feels { margin: 4px 0 12px; color: var(--quiet); }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 0; }
+.stats div { background: var(--bg); border-radius: 10px; padding: 8px 10px; }
+.stats dt { font-size: 12px; color: var(--quiet); }
+.stats dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+.section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.section-head h2 { margin: 0; }
+.toggle { display: inline-flex; background: var(--bg); border-radius: 999px; padding: 3px; }
+.toggle button { border: 0; background: transparent; padding: 6px 14px; border-radius: 999px; font: inherit; font-size: 14px; color: var(--quiet); cursor: pointer; }
+.toggle button.on { background: var(--brand); color: #fff; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; height: auto; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: #fff; font-size: 13px; padding: 4px 8px; border-radius: 6px; white-space: nowrap; transform: translate(-50%, -120%); }
+.note { margin: 8px 0 0; font-size: 13px; color: var(--quiet); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { font-size: 13px; color: var(--quiet); font-weight: 600; }
+.dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.signup form { display: flex; gap: 8px; flex-wrap: wrap; }
+.signup input { flex: 1 1 240px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font: inherit; }
+.signup button { padding: 10px 18px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+.signup-msg { min-height: 1.5em; margin: 8px 0 0; }
+.error { background: #FBEBEB; color: var(--unhealthy); padding: 10px 14px; border-radius: 10px; }
+.foot { color: var(--quiet); font-size: 13px; padding-bottom: 32px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+@media (max-width: 720px) {
+  .now { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .aqi-number { font-size: 56px; }
+}

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SaskAir Watch</title>
+  <meta name="description" content="Live air quality and weather for Saskatoon, with email alerts.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <div>
+        <h1>SaskAir Watch</h1>
+        <p class="sub">Live air quality and weather for <span id="city-name">Saskatoon</span></p>
+      </div>
+      <p class="updated" id="updated">Loading…</p>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <p class="error" id="error" hidden></p>
+
+    <section class="now">
+      <article class="card aqi-card" id="aqi-card">
+        <h2>Air quality</h2>
+        <div class="aqi-row">
+          <span class="aqi-number" id="aqi">–</span>
+          <div>
+            <p class="aqi-cat" id="aqi-cat">–</p>
+            <p class="aqi-scale">US AQI</p>
+          </div>
+        </div>
+        <p class="advice" id="advice"></p>
+      </article>
+
+      <article class="card weather-card">
+        <h2>Weather</h2>
+        <p class="temp"><span id="temp">–</span><span class="unit">°C</span></p>
+        <p class="feels">Feels like <strong id="feels">–</strong> °C</p>
+        <dl class="stats">
+          <div><dt>Wind</dt><dd><span id="wind">–</span> km/h</dd></div>
+          <div><dt>Humidity</dt><dd><span id="humidity">–</span>%</dd></div>
+          <div><dt>PM2.5</dt><dd><span id="pm25">–</span> µg/m³</dd></div>
+          <div><dt>PM10</dt><dd><span id="pm10">–</span> µg/m³</dd></div>
+        </dl>
+      </article>
+    </section>
+
+    <section class="card">
+      <div class="section-head">
+        <h2>Trends</h2>
+        <div class="toggle" role="group" aria-label="Time range">
+          <button type="button" data-hours="24" class="on">24 hours</button>
+          <button type="button" data-hours="168">7 days</button>
+        </div>
+      </div>
+      <h3>Air quality (US AQI)</h3>
+      <div class="chart" id="aqi-chart"></div>
+      <h3>Temperature (°C)</h3>
+      <div class="chart" id="temp-chart"></div>
+      <p class="note" id="trend-note"></p>
+    </section>
+
+    <section class="card">
+      <h2>Daily averages</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Date</th><th>Avg temp</th><th>Low / high</th><th>Avg AQI</th><th>Max AQI</th><th>Avg PM2.5</th><th>Readings</th></tr>
+          </thead>
+          <tbody id="daily"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card signup">
+      <h2>Get email alerts</h2>
+      <p>We'll email you when the air quality turns unhealthy (AQI over 100) or it gets dangerously cold or hot.</p>
+      <form id="signup">
+        <label for="email" class="sr-only">Email address</label>
+        <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email">
+        <button type="submit">Sign up</button>
+      </form>
+      <p class="signup-msg" id="signup-msg" role="status"></p>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    Data from Open-Meteo, collected every hour. Built on AWS (Lambda, DynamoDB, API Gateway, S3, SNS) · DEVP-600 project by Harsh Thaker and Saket Shah
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

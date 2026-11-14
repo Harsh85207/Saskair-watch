@@ -3,6 +3,22 @@
 Hourly weather and air quality for Saskatoon, built on AWS with a full DevOps workflow.
 DEVP-600 final project by Harsh Thaker and Saket Shah, Saskatchewan Polytechnic.
 
+## Sprint 3 increment (v3.0)
+
+- **Dashboard website** (`site/`), hosted on S3: current AQI with a colour and health advice, weather,
+  24-hour and 7-day charts (drawn with SVG, no outside libraries), a daily averages table, and an email sign-up form.
+  The address is the `WebsiteUrl` output of the stack.
+- **Email alerts (SNS):** the Ingest Lambda emails subscribers when the AQI goes above 100 or the
+  "feels like" temperature drops below -30 C. It only emails when a problem *starts*, not every hour.
+  To send a test email for a demo, run the Ingest Lambda with the test event `{"test_alert": true}`.
+- **`POST /subscribe`:** the sign-up form adds the email to the SNS topic (the person must confirm it).
+- **Monitoring:** CloudWatch dashboard `saskair-watch-monitoring` (Lambda runs, errors, duration, API requests
+  and latency, alarms) and a **missed-run alarm** that fires if the hourly job doesn't run for 2 hours.
+  All alarms email the alert topic.
+- **Pipeline:** after deploying, it runs 7 live API checks, publishes the website and checks that it is online.
+
+Optional repo variable: `ALERT_EMAIL` (your email, subscribed automatically on deploy).
+
 ## Sprint 2 increment (v2.0)
 
 The Ingest Lambda now also **cleans** each hourly reading (rounds numbers, handles missing values,
@@ -31,11 +47,13 @@ Everything is created by `template.yaml` (CloudFormation) and deployed by GitHub
 
 ```
 .github/workflows/pipeline.yml   CI/CD: test + lint on PRs, deploy + smoke test on main
-template.yaml                    S3, DynamoDB, 2 Lambdas, API Gateway, EventBridge, IAM, logs, alarms
+template.yaml                    S3, DynamoDB, 2 Lambdas, API Gateway, SNS, website bucket, EventBridge, dashboard, alarms
 src/ingest/app.py                Ingest Lambda: fetch, save raw to S3, clean, save to DynamoDB
 src/query/query_app.py           Query Lambda behind API Gateway (/latest, /history)
 tests/test_ingest.py             Unit tests for fetching, cleaning and saving
-tests/test_query.py              Unit tests for the API logic and daily averages
+tests/test_query.py              Unit tests for the API logic, daily averages and /subscribe
+tests/test_site.py               Checks on the dashboard files
+site/                            Dashboard website (index.html, app.js, style.css, config.js)
 scripts/check_api.py             Live API tests run by the pipeline after each deploy
 scripts/create_backlog.sh        Creates the product backlog as GitHub issues
 ```

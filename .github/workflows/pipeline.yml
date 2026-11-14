@@ -71,7 +71,8 @@ jobs:
               CodeBucket="$ARTIFACT_BUCKET" \
               CodeKey="ingest-${{ github.sha }}.zip" \
               QueryCodeKey="query-${{ github.sha }}.zip" \
-              ExistingRoleArn="${{ vars.EXISTING_ROLE_ARN }}"
+              ExistingRoleArn="${{ vars.EXISTING_ROLE_ARN }}" \
+              AlertEmail="${{ vars.ALERT_EMAIL }}"
 
       - name: Smoke test - run the Ingest Lambda once
         run: |
@@ -85,3 +86,20 @@ jobs:
             --query "Stacks[0].Outputs[?OutputKey=='ApiUrl'].OutputValue" --output text)
           echo "API URL: $API_URL"
           python3 scripts/check_api.py "$API_URL"
+
+      - name: Publish the dashboard website
+        run: |
+          out() { aws cloudformation describe-stacks --stack-name "$STACK_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='$1'].OutputValue" --output text; }
+          API_URL=$(out ApiUrl)
+          SITE_BUCKET=$(out WebsiteBucketName)
+          echo "window.SASKAIR_CONFIG = { apiUrl: \"$API_URL\" };" > site/config.js
+          aws s3 sync site/ "s3://$SITE_BUCKET/" --delete --cache-control "max-age=300"
+          echo "WEBSITE_URL=$(out WebsiteUrl)" >> "$GITHUB_ENV"
+
+      - name: Website test - the dashboard is online
+        run: |
+          echo "Dashboard: $WEBSITE_URL"
+          curl -sSf "$WEBSITE_URL" | grep -q "SaskAir Watch"
+          curl -sSf "$WEBSITE_URL/config.js" | grep -q "execute-api"
+          echo "PASS dashboard is online and points at the API"

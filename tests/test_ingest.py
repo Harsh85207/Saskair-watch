@@ -124,6 +124,7 @@ def test_dynamo_item_uses_decimals_and_drops_empty_values():
 def test_handler_saves_clean_record_to_dynamodb(monkeypatch):
     monkeypatch.setenv("RAW_BUCKET", "test-bucket")
     s3, table = MagicMock(), MagicMock()
+    table.query.return_value = {"Items": []}
     fake_fetch = lambda url: AIR if "air-quality" in url else WEATHER
 
     result = app.lambda_handler({}, None, s3_client=s3, fetch=fake_fetch, now=NOW, table=table)
@@ -133,3 +134,53 @@ def test_handler_saves_clean_record_to_dynamodb(monkeypatch):
     assert item["city"] == "saskatoon"
     assert item["timestamp"] == "2026-11-03T14:00:00Z"
     assert result["aqi_category"] == "Good"
+
+
+# ---------- Sprint 3: email alerts (SA-14) ----------
+LIMITS = {"aqi": 100, "cold": -30, "hot": 32}
+SMOKY = {"current": {"us_aqi": 160, "pm2_5": 70.2}}
+
+
+def test_check_alerts_finds_each_problem():
+    assert app.check_alerts({"us_aqi": 42, "temperature_c": -5, "feels_like_c": -9}, LIMITS) == []
+    assert app.check_alerts({"us_aqi": 160}, LIMITS) == ["aqi"]
+    assert app.check_alerts({"temperature_c": -28, "feels_like_c": -41}, LIMITS) == ["cold"]
+    assert app.check_alerts({"temperature_c": 35}, LIMITS) == ["hot"]
+    assert app.check_alerts(None, LIMITS) == []
+
+
+def test_only_alert_when_a_problem_starts():
+    assert app.new_alerts(["aqi"], []) == ["aqi"]
+    assert app.new_alerts(["aqi"], ["aqi"]) == []          # still smoky, no repeat email
+    assert app.new_alerts(["aqi", "cold"], ["aqi"]) == ["cold"]
+
+
+def run_handler(monkeypatch, air, previous_items, event=None):
+    monkeypatch.setenv("RAW_BUCKET", "test-bucket")
+    monkeypatch.setenv("ALERT_TOPIC_ARN", "arn:aws:sns:us-east-1:123:saskair-alerts")
+    s3, table, sns = MagicMock(), MagicMock(), MagicMock()
+    table.query.return_value = {"Items": previous_items}
+    fake_fetch = lambda url: air if "air-quality" in url else WEATHER
+    result = app.lambda_handler(event or {}, None, s3_client=s3, fetch=fake_fetch, now=NOW, table=table, sns_client=sns)
+    return result, sns
+
+
+def test_handler_emails_when_smoke_starts(monkeypatch):
+    result, sns = run_handler(monkeypatch, SMOKY, [{"us_aqi": 40}])
+    sns.publish.assert_called_once()
+    kwargs = sns.publish.call_args.kwargs
+    assert "AQI" in kwargs["Subject"]
+    assert "160" in kwargs["Message"]
+    assert result["alerts_sent"] == ["aqi"]
+
+
+def test_handler_does_not_repeat_alert(monkeypatch):
+    result, sns = run_handler(monkeypatch, SMOKY, [{"us_aqi": 150}])
+    sns.publish.assert_not_called()
+    assert result["alerts_sent"] == []
+
+
+def test_test_alert_event_sends_email_for_demo(monkeypatch):
+    result, sns = run_handler(monkeypatch, AIR, [], event={"test_alert": True})
+    sns.publish.assert_called_once()
+    assert sns.publish.call_args.kwargs["Subject"].startswith("[TEST]")

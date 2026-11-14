@@ -85,3 +85,36 @@ def test_history_rejects_bad_hours():
 
 def test_unknown_path_404():
     assert call("/nothing")[0] == 404
+
+
+# ---------- Sprint 3: POST /subscribe ----------
+from unittest.mock import MagicMock  # noqa: E402
+
+
+def subscribe_call(monkeypatch, body):
+    monkeypatch.setenv("ALERT_TOPIC_ARN", "arn:aws:sns:us-east-1:123:saskair-alerts")
+    sns = MagicMock()
+    event = {"resource": "/subscribe", "httpMethod": "POST", "body": body}
+    res = query_app.lambda_handler(event, None, table=FakeTable([]), sns_client=sns)
+    return res["statusCode"], json.loads(res["body"]), sns
+
+
+def test_subscribe_signs_up_valid_email(monkeypatch):
+    status, body, sns = subscribe_call(monkeypatch, json.dumps({"email": "student@example.com"}))
+    assert status == 200
+    sns.subscribe.assert_called_once()
+    assert sns.subscribe.call_args.kwargs["Endpoint"] == "student@example.com"
+    assert sns.subscribe.call_args.kwargs["Protocol"] == "email"
+
+
+def test_subscribe_accepts_form_body(monkeypatch):
+    status, _, sns = subscribe_call(monkeypatch, "email=student%40example.com")
+    assert status == 200
+    assert sns.subscribe.call_args.kwargs["Endpoint"] == "student@example.com"
+
+
+def test_subscribe_rejects_bad_email(monkeypatch):
+    for bad in ["", "not-an-email", json.dumps({"email": "a@b"}), json.dumps(["x"])]:
+        status, _, sns = subscribe_call(monkeypatch, bad)
+        assert status == 400
+        sns.subscribe.assert_not_called()

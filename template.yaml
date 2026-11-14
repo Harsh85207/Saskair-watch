@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: SaskAir Watch - Sprint 2 (hourly ingestion to S3 + DynamoDB, Query Lambda, REST API)
+Description: SaskAir Watch - Sprint 3 (ingestion, DynamoDB, REST API, dashboard website, SNS alerts, monitoring)
 
 Parameters:
   ProjectName:
@@ -23,6 +23,18 @@ Parameters:
   QueryCodeKey:
     Type: String
     Description: S3 key of the zipped Query Lambda code, e.g. query-<commit>.zip
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: Optional. Your email address, subscribed to alerts automatically (you must confirm it).
+  AqiLimit:
+    Type: Number
+    Default: 100
+    Description: Send an alert when the US AQI goes above this
+  ColdLimit:
+    Type: Number
+    Default: -30
+    Description: Send an alert when the "feels like" temperature drops below this (C)
   ExistingRoleArn:
     Type: String
     Default: ""
@@ -32,6 +44,7 @@ Parameters:
 
 Conditions:
   CreateRole: !Equals [!Ref ExistingRoleArn, ""]
+  HasAlertEmail: !Not [!Equals [!Ref AlertEmail, ""]]
 
 Resources:
   RawDataBucket:
@@ -70,6 +83,20 @@ Resources:
         - Key: Project
           Value: !Ref ProjectName
 
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ProjectName}-alerts"
+      DisplayName: SaskAir Watch
+
+  OwnerAlertSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlertEmail
+    Properties:
+      TopicArn: !Ref AlertTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
   IngestFunctionRole:
     Type: AWS::IAM::Role
     Condition: CreateRole
@@ -100,6 +127,15 @@ Resources:
                   - dynamodb:PutItem
                   - dynamodb:Query
                 Resource: !GetAtt ReadingsTable.Arn
+        - PolicyName: SendAlerts
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                  - sns:Subscribe
+                Resource: !Ref AlertTopic
 
   IngestLogGroup:
     Type: AWS::Logs::LogGroup
@@ -125,6 +161,9 @@ Resources:
         Variables:
           RAW_BUCKET: !Ref RawDataBucket
           TABLE_NAME: !Ref ReadingsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
+          AQI_LIMIT: !Ref AqiLimit
+          COLD_LIMIT: !Ref ColdLimit
           CITY: !Ref City
           LATITUDE: !Ref Latitude
           LONGITUDE: !Ref Longitude
@@ -167,6 +206,8 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
 
   QueryLogGroup:
     Type: AWS::Logs::LogGroup
@@ -191,6 +232,7 @@ Resources:
       Environment:
         Variables:
           TABLE_NAME: !Ref ReadingsTable
+          ALERT_TOPIC_ARN: !Ref AlertTopic
       Tags:
         - Key: Project
           Value: !Ref ProjectName
@@ -242,20 +284,41 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryFunction.Arn}/invocations"
 
-  ApiDeployment:
+  SubscribeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref RestApi
+      ParentId: !GetAtt RestApi.RootResourceId
+      PathPart: subscribe
+
+  SubscribeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref RestApi
+      ResourceId: !Ref SubscribeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${QueryFunction.Arn}/invocations"
+
+  # New logical ID so CloudFormation makes a fresh deployment that includes /subscribe
+  ApiDeploymentV3:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
       - LatestMethod
       - HistoryMethod
+      - SubscribeMethod
     Properties:
       RestApiId: !Ref RestApi
-      Description: Sprint 2 API deployment
+      Description: Sprint 3 API deployment (/latest, /history, /subscribe)
 
   ApiStage:
     Type: AWS::ApiGateway::Stage
     Properties:
       RestApiId: !Ref RestApi
-      DeploymentId: !Ref ApiDeployment
+      DeploymentId: !Ref ApiDeploymentV3
       StageName: prod
 
   AllowApiGatewayToInvoke:
@@ -264,7 +327,7 @@ Resources:
       FunctionName: !Ref QueryFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/GET/*"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RestApi}/*/*/*"
 
   QueryErrorAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -282,6 +345,79 @@ Resources:
       Threshold: 1
       ComparisonOperator: GreaterThanOrEqualToThreshold
       TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  MissedRunAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${ProjectName}-missed-hourly-run"
+      AlarmDescription: The Ingest Lambda has not run for 2 hours (the hourly schedule may be broken)
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IngestFunction
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref AlertTopic
+
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${ProjectName}-site-${AWS::AccountId}-${AWS::Region}"
+      WebsiteConfiguration:
+        IndexDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: PublicReadForDashboard
+            Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+
+  MonitoringDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "${ProjectName}-monitoring"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {"type": "metric", "x": 0, "y": 0, "width": 12, "height": 6,
+             "properties": {"title": "Ingest Lambda: runs and errors (should run every hour)", "region": "${AWS::Region}", "stat": "Sum", "period": 3600, "view": "timeSeries",
+               "metrics": [["AWS/Lambda", "Invocations", "FunctionName", "${IngestFunction}"], [".", "Errors", ".", "."]]}},
+            {"type": "metric", "x": 12, "y": 0, "width": 12, "height": 6,
+             "properties": {"title": "Ingest Lambda: duration (ms)", "region": "${AWS::Region}", "stat": "Average", "period": 3600, "view": "timeSeries",
+               "metrics": [["AWS/Lambda", "Duration", "FunctionName", "${IngestFunction}"]]}},
+            {"type": "metric", "x": 0, "y": 6, "width": 12, "height": 6,
+             "properties": {"title": "API: requests and errors", "region": "${AWS::Region}", "stat": "Sum", "period": 300, "view": "timeSeries",
+               "metrics": [["AWS/ApiGateway", "Count", "ApiName", "${ProjectName}-api"], [".", "4XXError", ".", "."], [".", "5XXError", ".", "."]]}},
+            {"type": "metric", "x": 12, "y": 6, "width": 12, "height": 6,
+             "properties": {"title": "API: latency (ms)", "region": "${AWS::Region}", "stat": "Average", "period": 300, "view": "timeSeries",
+               "metrics": [["AWS/ApiGateway", "Latency", "ApiName", "${ProjectName}-api"]]}},
+            {"type": "alarm", "x": 0, "y": 12, "width": 24, "height": 3,
+             "properties": {"title": "Alarms", "alarms": ["${IngestErrorAlarm.Arn}", "${QueryErrorAlarm.Arn}", "${MissedRunAlarm.Arn}"]}}
+          ]
+        }
 
 Outputs:
   RawDataBucketName:
@@ -294,6 +430,15 @@ Outputs:
     Value: !Ref ReadingsTable
   QueryFunctionName:
     Value: !Ref QueryFunction
+  WebsiteUrl:
+    Description: The public dashboard website
+    Value: !GetAtt WebsiteBucket.WebsiteURL
+  WebsiteBucketName:
+    Value: !Ref WebsiteBucket
+  AlertTopicArn:
+    Value: !Ref AlertTopic
+  MonitoringDashboardUrl:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${ProjectName}-monitoring"
   ApiUrl:
     Description: Base URL of the REST API
     Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/prod"
